@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +15,22 @@ from nomark.config import (
     TELEGRAM_MAX_UPLOAD_BYTES,
     TELEGRAM_PHOTO_MAX_BYTES,
 )
+
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def truncate_html_safe(text: str, limit: int = 1024) -> str:
+    """Truncate Telegram HTML caption/message safely without leaving broken tags or entities."""
+    if len(text) <= limit:
+        return text
+    plain = html.unescape(_HTML_TAG_RE.sub("", text))
+    cut = plain[: max(0, limit - 3)].rstrip()
+    escaped = html.escape(cut)
+    while len(escaped) + 3 > limit and cut:
+        cut = cut[:-1]
+        escaped = html.escape(cut)
+    return f"{escaped}..."
 
 
 def _extract_cached_file_id(field: str, res: dict[str, Any], fallback: str) -> str:
@@ -94,6 +112,7 @@ class AsyncTelegramClient:
             body["reply_markup"] = reply_markup
         if reply_to_message_id is not None:
             body["reply_to_message_id"] = reply_to_message_id
+            body["allow_sending_without_reply"] = True
         res = await self._post("sendMessage", payload=body)
         return int(res["result"]["message_id"])
 
@@ -153,9 +172,10 @@ class AsyncTelegramClient:
         if api_method == "sendVideo":
             body["supports_streaming"] = True
         if caption:
-            body["caption"] = caption[:1024]
+            body["caption"] = truncate_html_safe(caption, 1024)
         if reply_to_message_id is not None:
             body["reply_to_message_id"] = reply_to_message_id
+            body["allow_sending_without_reply"] = True
         if reply_markup is not None:
             body["reply_markup"] = reply_markup
         res = await self._post(api_method, payload=body, timeout=30.0)
@@ -236,6 +256,7 @@ class SyncTelegramClient:
             body["reply_markup"] = reply_markup
         if reply_to_message_id is not None:
             body["reply_to_message_id"] = reply_to_message_id
+            body["allow_sending_without_reply"] = True
         res = self._post("sendMessage", json_body=body)
         return int(res["result"]["message_id"])
 
@@ -310,9 +331,10 @@ class SyncTelegramClient:
             raise ValueError("Output exceeds Telegram Bot API 50 MB upload limit.")
         data: dict[str, Any] = {"chat_id": str(chat_id), "parse_mode": "HTML"}
         if caption:
-            data["caption"] = caption[:1024]
+            data["caption"] = truncate_html_safe(caption, 1024)
         if reply_to_message_id is not None:
             data["reply_to_message_id"] = str(reply_to_message_id)
+            data["allow_sending_without_reply"] = "true"
         if encoded := self._encode_markup(reply_markup):
             data["reply_markup"] = encoded
         with open(file_path, "rb") as handle:
@@ -344,9 +366,10 @@ class SyncTelegramClient:
             )
         data: dict[str, Any] = {"chat_id": str(chat_id), "parse_mode": "HTML"}
         if caption:
-            data["caption"] = caption[:1024]
+            data["caption"] = truncate_html_safe(caption, 1024)
         if reply_to_message_id is not None:
             data["reply_to_message_id"] = str(reply_to_message_id)
+            data["allow_sending_without_reply"] = "true"
         if encoded := self._encode_markup(reply_markup):
             data["reply_markup"] = encoded
         with open(file_path, "rb") as handle:
@@ -376,9 +399,10 @@ class SyncTelegramClient:
             "supports_streaming": "true",
         }
         if caption:
-            data["caption"] = caption[:1024]
+            data["caption"] = truncate_html_safe(caption, 1024)
         if reply_to_message_id is not None:
             data["reply_to_message_id"] = str(reply_to_message_id)
+            data["allow_sending_without_reply"] = "true"
         if encoded := self._encode_markup(reply_markup):
             data["reply_markup"] = encoded
         with open(file_path, "rb") as handle:
@@ -404,9 +428,10 @@ class SyncTelegramClient:
             raise ValueError("Output audio exceeds Telegram Bot API 50 MB upload limit.")
         data: dict[str, Any] = {"chat_id": str(chat_id), "parse_mode": "HTML"}
         if caption:
-            data["caption"] = caption[:1024]
+            data["caption"] = truncate_html_safe(caption, 1024)
         if reply_to_message_id is not None:
             data["reply_to_message_id"] = str(reply_to_message_id)
+            data["allow_sending_without_reply"] = "true"
         if encoded := self._encode_markup(reply_markup):
             data["reply_markup"] = encoded
         with open(file_path, "rb") as handle:

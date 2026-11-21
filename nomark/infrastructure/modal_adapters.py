@@ -282,8 +282,9 @@ class ModalVolumeHelper:
         if not staged_path:
             return
         try:
-            slot = Path(staged_path).parent
-            if str(slot).startswith(TMP_INPUTS_DIR) and slot.exists():
+            base = Path(TMP_INPUTS_DIR).resolve()
+            slot = Path(staged_path).resolve().parent
+            if slot != base and slot.is_relative_to(base) and slot.exists():
                 shutil.rmtree(slot, ignore_errors=True)
                 self.safe_commit()
         except Exception:

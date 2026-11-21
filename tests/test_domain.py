@@ -57,6 +57,7 @@ from nomark.infrastructure.media_io import (
     pack_files_to_zip,
 )
 from nomark.infrastructure.ml_loaders import _CfgPipeProxy
+from nomark.infrastructure.telegram_client import truncate_html_safe
 
 
 class DomainModelTests(unittest.TestCase):
@@ -266,6 +267,16 @@ class MediaIoTests(unittest.TestCase):
         self.assertEqual(calls[-1]["negative_prompt_embeds"], "NEG_TENSOR")
         proxy(guidance_scale=1.0, prompt_embeds="POS_TENSOR")
         self.assertNotIn("negative_prompt_embeds", calls[-1])
+
+    def test_truncate_html_safe_never_breaks_tags(self) -> None:
+        short = "<b>OK</b>"
+        self.assertEqual(truncate_html_safe(short, 1024), short)
+        long_html = "<b>Title</b> " + ("<a href='https://x.test'>link &amp; text</a> " * 40)
+        truncated = truncate_html_safe(long_html, 120)
+        self.assertLessEqual(len(truncated), 120)
+        self.assertTrue(truncated.endswith("..."))
+        self.assertNotIn("<a ", truncated)
+        self.assertNotIn("<b>", truncated)
 
 
 if __name__ == "__main__":

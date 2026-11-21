@@ -58,7 +58,13 @@ def download_url_safe(url: str, dest_dir: Path, max_bytes: int = URL_MAX_DOWNLOA
     _validate_public_url(target_url)
 
     dest_dir.mkdir(parents=True, exist_ok=True)
-    with httpx.Client(timeout=180.0, follow_redirects=True, max_redirects=6) as client:
+    # Validate EVERY redirect hop BEFORE connecting to block SSRF redirect chains.
+    with httpx.Client(
+        timeout=180.0,
+        follow_redirects=True,
+        max_redirects=6,
+        event_hooks={"request": [lambda req: _validate_public_url(str(req.url))]},
+    ) as client:
         with client.stream("GET", target_url, headers={"User-Agent": "NoMarkBot/4.0"}) as resp:
             resp.raise_for_status()
             _validate_public_url(str(resp.url))
@@ -217,16 +223,81 @@ def inject_camera_exif(image_path: Path, profile: str) -> Path:
     return jpg_out
 
 
+def _probe_video_stream_info(src: Path) -> dict[str, object] | None:
+    """Return width, height, pix_fmt, bits, color_transfer of the first video stream via ffprobe."""
+    try:
+        proc = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height,pix_fmt,bits_per_raw_sample,color_transfer",
+                "-of",
+                "json",
+                str(src),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        streams = json.loads(proc.stdout or "{}").get("streams") or []
+        return streams[0] if streams else None
+    except Exception:
+        return None
+
+
 def ensure_video_mp4_if_needed(src: Path, work_dir: Path, needs_isobmff: bool) -> Path:
+    """Normalize incompatible containers, 10-bit/HDR (iPhone), odd dimensions, or >1080p clips for Wan/SD-VAE."""
     allowed = {".mp4", ".mov", ".m4v"} if needs_isobmff else {".mp4", ".mov", ".m4v", ".mkv"}
-    if src.suffix.lower() in allowed:
+    needs_transcode = src.suffix.lower() not in allowed
+    vf_filters: list[str] = []
+
+    info = _probe_video_stream_info(src)
+    if info is not None:
+        width = int(info.get("width") or 0)
+        height = int(info.get("height") or 0)
+        pix_fmt = str(info.get("pix_fmt") or "").lower()
+        bits_raw = str(info.get("bits_per_raw_sample") or "")
+        bits = int(bits_raw) if bits_raw.isdigit() else 8
+        trc = str(info.get("color_transfer") or "").lower()
+
+        is_hdr_or_10bit = (
+            bits > 8
+            or trc in {"smpte2084", "arib-std-b67"}
+            or any(tag in pix_fmt for tag in ("10le", "10be", "12le", "12be", "p010", "p016"))
+        )
+        max_pixels = 1920 * 1080
+        if needs_isobmff and width > 0 and height > 0 and width * height > max_pixels:
+            scale_factor = (max_pixels / (width * height)) ** 0.5
+            new_w = max(2, int(width * scale_factor) // 2 * 2)
+            new_h = max(2, int(height * scale_factor) // 2 * 2)
+            vf_filters.append(f"scale={new_w}:{new_h}:flags=lanczos")
+            needs_transcode = True
+        elif width % 2 or height % 2:
+            vf_filters.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
+            needs_transcode = True
+
+        if is_hdr_or_10bit:
+            needs_transcode = True
+
+    if not needs_transcode:
         return src
+
     converted = work_dir / f"{src.stem}_converted.mp4"
-    cmd = [
-        "ffmpeg", "-y", "-i", str(src),
-        "-c:v", "libx264", "-preset", "fast", "-crf", "18", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "192k", str(converted),
-    ]
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src)]
+    if vf_filters:
+        cmd.extend(["-vf", ",".join(vf_filters)])
+    cmd.extend(
+        [
+            "-c:v", "libx264", "-preset", "fast", "-crf", "16", "-pix_fmt", "yuv420p",
+            "-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709",
+            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+            str(converted),
+        ]
+    )
     subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     return converted
 

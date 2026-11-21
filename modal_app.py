@@ -256,7 +256,10 @@ async def download_file_endpoint(token: str = "") -> Any:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         if time.time() > float(meta.get("expires_at", 0)):
             raise HTTPException(status_code=410, detail="Download link expired")
-        filename = str(meta["filename"])
+        raw_filename = str(meta["filename"])
+        filename = Path(raw_filename).name
+        if not filename or filename != raw_filename:
+            raise HTTPException(status_code=404, detail="Invalid filename")
     except HTTPException:
         raise
     except Exception as exc:

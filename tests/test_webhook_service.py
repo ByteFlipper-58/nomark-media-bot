@@ -519,6 +519,37 @@ class WebhookAndAlbumServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r_check, {"ok": True, "dispatched": "act_check"})
         self.assertEqual(self.dispatcher.spawned[-1][1]["mode"], MODE_IDENTIFY)
 
+    async def test_anonymous_sender_and_botname_commands_do_not_crash(self) -> None:
+        # Message without from.id (e.g. channel/anonymous admin) must not raise TypeError
+        res_anon = await self.service.handle_update(
+            {
+                "update_id": 60,
+                "message": {"message_id": 600, "chat": {"id": -100123}, "text": "/help@NoMarkBot"},
+            }
+        )
+        self.assertEqual(res_anon, {"ok": True, "command": "help"})
+
+        # /text@NoMarkBot must strip the @botname from payload_text
+        res_txt = await self.service.handle_update(
+            {
+                "update_id": 61,
+                "message": {
+                    "message_id": 601,
+                    "chat": {"id": 42},
+                    "from": {"id": 42},
+                    "text": "/text@NoMarkBot clean this text",
+                },
+            }
+        )
+        self.assertEqual(res_txt, {"ok": True, "dispatched": "cpu_text"})
+        self.assertEqual(self.dispatcher.spawned[-1][1]["raw_text"], "clean this text")
+
+        # Message without message_id is safely ignored
+        res_no_mid = await self.service.handle_update(
+            {"update_id": 62, "message": {"chat": {"id": 42}, "text": "/start"}}
+        )
+        self.assertEqual(res_no_mid, {"ok": True})
+
 
 if __name__ == "__main__":
     unittest.main()

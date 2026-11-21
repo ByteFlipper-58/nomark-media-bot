@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 
 from nomark.config import (
+    CACHE_DIR,
     DOWNLOAD_LINK_TTL_SEC,
     EXIF_OFF,
     LANG_RU,
@@ -92,6 +93,24 @@ class SyncJobDispatcher(Protocol):
 # ---------------------------------------------------------------------------
 
 
+def _safe_edit_status(tg: SyncTelegramClient, chat_id: int, message_id: int, text: str) -> None:
+    """Best-effort progress update so transient Telegram 429/network blips never abort a batch."""
+    try:
+        tg.edit_message_text(chat_id, message_id, text)
+    except Exception as exc:
+        log.debug("Non-fatal status edit skipped: %s", exc)
+
+
+def _hf_cache_snapshot_count() -> int:
+    hub_dir = Path(CACHE_DIR) / "hf" / "hub"
+    if not hub_dir.exists():
+        return 0
+    try:
+        return sum(1 for _ in hub_dir.iterdir())
+    except Exception:
+        return 0
+
+
 def deliver_file(
     tg: SyncTelegramClient,
     vol: ModalVolumeHelper,
@@ -120,14 +139,17 @@ def deliver_file(
 
     if kind == "image":
         if photo_output == PHOTO_OUT_PHOTO and size <= TELEGRAM_PHOTO_MAX_BYTES:
-            fid = tg.send_photo(
-                chat_id,
-                file_path,
-                caption=caption,
-                reply_to_message_id=reply_to_message_id,
-                reply_markup=reply_markup,
-            )
-            return fid, "photo"
+            try:
+                fid = tg.send_photo(
+                    chat_id,
+                    file_path,
+                    caption=caption,
+                    reply_to_message_id=reply_to_message_id,
+                    reply_markup=reply_markup,
+                )
+                return fid, "photo"
+            except Exception as photo_exc:
+                log.warning("sendPhoto failed (%s), falling back to sendDocument", photo_exc)
         fid = tg.send_document(
             chat_id,
             file_path,
@@ -415,7 +437,8 @@ def run_cpu_file_pipeline(
 
                     for idx, img_path in enumerate(images, start=1):
                         if idx == 1 or idx % 4 == 0 or idx == len(images):
-                            tg.edit_message_text(
+                            _safe_edit_status(
+                                tg,
                                 chat_id,
                                 status_message_id,
                                 t("status.zip_cpu_progress", lang, idx=idx, n=len(images)),
@@ -886,7 +909,8 @@ def run_cpu_album_pipeline(
 
                 processed = 0
                 for idx, item in enumerate(items, start=1):
-                    tg.edit_message_text(
+                    _safe_edit_status(
+                        tg,
                         chat_id,
                         status_message_id,
                         t("status.album_cpu_progress", lang, idx=idx, n=len(items)),
@@ -961,12 +985,9 @@ def run_cpu_text_pipeline(
                     codepoints=res.removed_codepoints,
                     markers=len(res.detected_markers),
                 )
-                if len(res.cleaned_text) <= 3400:
-                    tg.edit_message_text(
-                        chat_id,
-                        status_message_id,
-                        f"{header}\n\n<pre>{html.escape(res.cleaned_text)}</pre>",
-                    )
+                full_html = f"{header}\n\n<pre>{html.escape(res.cleaned_text)}</pre>"
+                if len(full_html) <= 4000:
+                    tg.edit_message_text(chat_id, status_message_id, full_html)
                 else:
                     with tempfile.TemporaryDirectory(prefix="nomark_txt_") as tmp:
                         out = Path(tmp) / "cleaned_text.txt"
@@ -1232,7 +1253,8 @@ def run_gpu_photo_pipeline(
                 )
                 out = work_dir / choose_output_filename(src.name, "image")
 
-                tg.edit_message_text(chat_id, status_message_id, t("status.photo_cleaning", lang))
+                _safe_edit_status(tg, chat_id, status_message_id, t("status.photo_cleaning", lang))
+                hf_before = _hf_cache_snapshot_count()
                 engine = get_engine()
                 final_out, before_report, before_meta, after_meta, eff_vendor, result = process_one_photo(
                     src,
@@ -1242,6 +1264,8 @@ def run_gpu_photo_pipeline(
                     photo_vendor=photo_vendor,
                     camera_exif=camera_exif,
                 )
+                if _hf_cache_snapshot_count() > hf_before:
+                    vol.safe_commit()
 
                 elapsed = time.monotonic() - started
                 warn_note = state.record_stat_sync("photos", "l4", elapsed, lang=lang)
@@ -1315,13 +1339,14 @@ def run_gpu_album_pipeline(
         try:
             with tempfile.TemporaryDirectory(prefix="nomark_album_gpu_") as tmp:
                 work_dir = Path(tmp)
-                tg.edit_message_text(chat_id, status_message_id, t("status.album_warming", lang, n=len(items)))
+                _safe_edit_status(tg, chat_id, status_message_id, t("status.album_warming", lang, n=len(items)))
+                hf_before = _hf_cache_snapshot_count()
                 engine = get_engine()
                 done = 0
                 failed = 0
 
                 for idx, item in enumerate(items, start=1):
-                    tg.edit_message_text(chat_id, status_message_id, t("status.album_progress", lang, idx=idx, n=len(items)))
+                    _safe_edit_status(tg, chat_id, status_message_id, t("status.album_progress", lang, idx=idx, n=len(items)))
                     try:
                         src = tg.download_file(item["file_id"], work_dir / f"{idx:02d}_{item['file_name']}")
                         out = work_dir / f"{idx:02d}_{choose_output_filename(item['file_name'], 'image')}"
@@ -1356,6 +1381,9 @@ def run_gpu_album_pipeline(
                     except Exception as item_exc:
                         log.warning("Album item %d failed: %s", idx, item_exc)
                         failed += 1
+
+                if _hf_cache_snapshot_count() > hf_before:
+                    vol.safe_commit()
 
                 elapsed = time.monotonic() - started
                 warn_note = state.record_stat_sync("albums", "l4", elapsed, count=1, lang=lang)
@@ -1412,7 +1440,8 @@ def run_gpu_zip_pipeline(
                 if not images:
                     raise ValueError(t("err.zip_no_images", lang))
 
-                tg.edit_message_text(chat_id, status_message_id, t("status.zip_gpu_warming", lang, n=len(images)))
+                _safe_edit_status(tg, chat_id, status_message_id, t("status.zip_gpu_warming", lang, n=len(images)))
+                hf_before = _hf_cache_snapshot_count()
                 engine = get_engine()
                 out_dir = work_dir / "cleaned"
                 out_dir.mkdir(exist_ok=True)
@@ -1420,7 +1449,7 @@ def run_gpu_zip_pipeline(
                 failed = 0
 
                 for idx, img_path in enumerate(images, start=1):
-                    tg.edit_message_text(chat_id, status_message_id, t("status.zip_gpu_progress", lang, idx=idx, n=len(images)))
+                    _safe_edit_status(tg, chat_id, status_message_id, t("status.zip_gpu_progress", lang, idx=idx, n=len(images)))
                     orig_name = img_path.name.split("_", 1)[1] if "_" in img_path.name else img_path.name
                     arc_name = choose_output_filename(orig_name, "image")
                     out_img = out_dir / f"{idx:03d}_{arc_name}"
@@ -1438,6 +1467,9 @@ def run_gpu_zip_pipeline(
                     except Exception as item_exc:
                         log.warning("ZIP item %s failed: %s", orig_name, item_exc)
                         failed += 1
+
+                if _hf_cache_snapshot_count() > hf_before:
+                    vol.safe_commit()
 
                 if not cleaned_pairs:
                     raise RuntimeError(t("err.zip_all_failed", lang))
@@ -1683,15 +1715,17 @@ def run_gpu_video_pipeline(
 
                 output_to_send = inv_result.output
                 if use_wan and natural_polish:
-                    tg.edit_message_text(chat_id, status_message_id, t("status.video_polish", lang))
+                    _safe_edit_status(tg, chat_id, status_message_id, t("status.video_polish", lang))
                     output_to_send = apply_natural_film_polish(output_to_send, polished_out)
+                    if inv_result.output != output_to_send:
+                        inv_result.output.unlink(missing_ok=True)
 
                 audio_label = t("cap.video_audio_none", lang)
                 streams = video_audio.stream_inventory(output_to_send)
                 has_audio = any(s.get("codec_type") == "audio" for s in streams)
                 if has_audio:
                     if clean_audio:
-                        tg.edit_message_text(chat_id, status_message_id, t("status.video_audio", lang))
+                        _safe_edit_status(tg, chat_id, status_message_id, t("status.video_audio", lang))
                         try:
                             audio_res = video_audio.remove_video_audio_all_streams(
                                 output_to_send,
@@ -1705,6 +1739,7 @@ def run_gpu_video_pipeline(
                             )
                         except Exception as first_exc:
                             if "quality" in str(first_exc).lower():
+                                final_out.unlink(missing_ok=True)
                                 audio_res = video_audio.remove_video_audio_all_streams(
                                     output_to_send,
                                     final_out,
@@ -1727,7 +1762,7 @@ def run_gpu_video_pipeline(
                         audio_label = t("cap.video_audio_copy", lang)
 
                 if output_to_send != final_out:
-                    output_to_send.rename(final_out)
+                    output_to_send.replace(final_out)
                     output_to_send = final_out
 
                 after_meta = get_ai_metadata(output_to_send)
@@ -1740,7 +1775,7 @@ def run_gpu_video_pipeline(
                     lang=lang,
                 )
 
-                tg.edit_message_text(chat_id, status_message_id, t("status.video_uploading", lang))
+                _safe_edit_status(tg, chat_id, status_message_id, t("status.video_uploading", lang))
                 caption_lines = [
                     t("cap.photo_gpu_title", lang, sec=elapsed),
                     t(

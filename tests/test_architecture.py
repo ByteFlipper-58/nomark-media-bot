@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import ast
 import builtins
+import inspect
+import string
 import unittest
 from pathlib import Path
+
+from nomark.infrastructure import pipelines
+from nomark.presentation.i18n import TRANSLATIONS
 
 ROOT = Path(__file__).resolve().parent.parent
 NOMARK_DIR = ROOT / "nomark"
@@ -143,6 +148,43 @@ class CleanArchitectureBoundaryTests(unittest.TestCase):
                     if node.id not in defined:
                         undefined.append(f"{node.id} (line {node.lineno})")
             self.assertEqual(undefined, [], f"Undefined names in {py.relative_to(ROOT)}: {undefined}")
+
+    def test_all_i18n_callsites_and_pipeline_kwargs_match(self) -> None:
+        """Verify every t(...) call uses valid keys/placeholders and modal_app matches pipeline signatures."""
+        formatter = string.Formatter()
+        for py in [ROOT / "modal_app.py", *sorted(NOMARK_DIR.rglob("*.py"))]:
+            tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "t":
+                    if node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str):
+                        key = node.args[0].value
+                        self.assertIn(key, TRANSLATIONS["ru"], f"{py}:{node.lineno} unknown key {key!r}")
+                        self.assertIn(key, TRANSLATIONS["en"], f"{py}:{node.lineno} unknown key {key!r}")
+                        expected = {f for _, f, _, _ in formatter.parse(TRANSLATIONS["ru"][key]) if f is not None} - {"bot"}
+                        passed = {kw.arg for kw in node.keywords if kw.arg is not None}
+                        if not any(kw.arg is None for kw in node.keywords):
+                            self.assertEqual(
+                                passed,
+                                expected,
+                                f"{py}:{node.lineno} t({key!r}) kwargs mismatch: passed={passed} expected={expected}",
+                            )
+
+        modal_tree = ast.parse((ROOT / "modal_app.py").read_text(encoding="utf-8"))
+        pipe_sigs = {name: inspect.signature(fn) for name, fn in inspect.getmembers(pipelines, inspect.isfunction)}
+        for node in ast.walk(modal_tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in pipe_sigs:
+                sig = pipe_sigs[node.func.id]
+                params = sig.parameters
+                passed_kw = {kw.arg for kw in node.keywords if kw.arg is not None}
+                self.assertEqual(passed_kw - set(params.keys()), set(), f"Unknown kwargs to {node.func.id}")
+                pos_names = set(list(params.keys())[: len(node.args)])
+                required = {
+                    n
+                    for n, p in params.items()
+                    if p.default is inspect.Parameter.empty
+                    and p.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)
+                }
+                self.assertEqual(required - passed_kw - pos_names, set(), f"Missing kwargs to {node.func.id}")
 
 
 if __name__ == "__main__":

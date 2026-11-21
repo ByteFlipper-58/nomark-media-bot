@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import re
 import time
 import uuid
 from typing import Any
@@ -54,6 +55,7 @@ from nomark.presentation.views import (
 )
 
 log = logging.getLogger("nomark.webhook")
+_CMD_RE = re.compile(r"^/([a-zA-Z0-9_]+)(?:@[a-zA-Z0-9_]+)?(?:\s+(.*))?$", re.DOTALL)
 
 
 class WebhookService:
@@ -125,7 +127,8 @@ class WebhookService:
         chat_id = (msg.get("chat") or {}).get("id")
         message_id = msg.get("message_id")
         data = str(callback.get("data") or "")
-        settings = await self._state.get_user_settings(int(user_id), default_lang=inferred_lang)
+        settings_owner_id = int(user_id) if user_id is not None else (int(chat_id) if chat_id is not None else 0)
+        settings = await self._state.get_user_settings(settings_owner_id, default_lang=inferred_lang)
         lang = settings.lang
 
         # 1. First-start language picker
@@ -134,7 +137,7 @@ class WebhookService:
             if chosen in SUPPORTED_LANGS:
                 settings = settings.with_updates(lang=chosen, lang_chosen=True)
                 tasks = [
-                    self._state.save_user_settings(int(user_id), settings),
+                    self._state.save_user_settings(settings_owner_id, settings),
                     self._tg.answer_callback_query(cb_id, t("cb.lang_updated", chosen)),
                 ]
                 if chat_id and message_id:
@@ -193,7 +196,7 @@ class WebhookService:
         return await self._handle_menu_callback(
             cb_id=cb_id,
             data=data,
-            user_id=int(user_id),
+            user_id=settings_owner_id,
             chat_id=chat_id,
             message_id=message_id,
             settings=settings,
@@ -640,7 +643,7 @@ class WebhookService:
         user_id = from_user.get("id")
         text = str(message.get("text") or "").strip()
 
-        if not chat_id:
+        if not chat_id or message_id is None:
             return {"ok": True}
 
         inferred_lang = infer_lang_from_telegram_user(from_user)
@@ -648,7 +651,8 @@ class WebhookService:
             await self._tg.send_message(int(chat_id), t("err.private_bot", inferred_lang), reply_to_message_id=message_id)
             return {"ok": True, "denied": True}
 
-        settings = await self._state.get_user_settings(int(user_id), default_lang=inferred_lang)
+        settings_owner_id = int(user_id) if user_id is not None else int(chat_id)
+        settings = await self._state.get_user_settings(settings_owner_id, default_lang=inferred_lang)
 
         if text.startswith("/"):
             cmd_result = await self._handle_command(
@@ -688,8 +692,13 @@ class WebhookService:
         settings: UserSettings,
     ) -> dict[str, Any] | None:
         lang = settings.lang
+        cmd_match = _CMD_RE.match(text)
+        if not cmd_match:
+            return None
+        cmd = cmd_match.group(1).lower()
+        cmd_arg = (cmd_match.group(2) or "").strip()
 
-        if text.startswith("/start"):
+        if cmd == "start":
             if not settings.lang_chosen:
                 await self._tg.send_message(
                     chat_id,
@@ -700,15 +709,15 @@ class WebhookService:
             await self._tg.send_message(chat_id, build_welcome_text(settings), reply_markup=build_menu_keyboard(settings))
             return {"ok": True, "command": "start"}
 
-        if text.startswith(("/help", "/menu")):
+        if cmd in {"help", "menu"}:
             await self._tg.send_message(chat_id, build_welcome_text(settings), reply_markup=build_menu_keyboard(settings))
             return {"ok": True, "command": "help"}
 
-        if text.startswith("/settings"):
+        if cmd == "settings":
             await self._tg.send_message(chat_id, build_settings_text(settings), reply_markup=build_settings_keyboard(settings))
             return {"ok": True, "command": "settings"}
 
-        if text.startswith("/stats"):
+        if cmd == "stats":
             stats, guard_on = await asyncio.gather(
                 self._state.get_stats(current_month_key()),
                 self._state.is_budget_guard_enabled(),
@@ -720,8 +729,8 @@ class WebhookService:
             )
             return {"ok": True, "command": "stats"}
 
-        if text.startswith("/text"):
-            payload_text = text[5:].strip()
+        if cmd == "text":
+            payload_text = cmd_arg
             if not payload_text:
                 reply_msg = message.get("reply_to_message") or {}
                 payload_text = str(reply_msg.get("text") or reply_msg.get("caption") or "").strip()
