@@ -1,0 +1,41 @@
+# Python bytecode & caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Secrets & local config
+.env
+.env.*
+.modal.toml
+
+# Local test media / temporary outputs
+*.mp4
+*.mov
+*.mkv
+*.webm
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.heic
+*.mp3
+*.wav
+*.ogg
+*.zip
+*.pt
+tmp/
+out/
+
+# OS & editor junk
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
