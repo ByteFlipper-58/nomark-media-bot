@@ -15,6 +15,9 @@ env/
 .env
 .env.*
 .modal.toml
+AGENTS.md
+agents.md
+AGENTS.local.md
 
 # Local test media / temporary outputs
 *.mp4
