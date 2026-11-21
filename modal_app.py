@@ -58,6 +58,7 @@ from nomark.infrastructure.pipelines import (
     run_cpu_erase_pipeline,
     run_cpu_file_pipeline,
     run_cpu_text_pipeline,
+    run_gpu_album_pipeline,
     run_gpu_audio_pipeline,
     run_gpu_photo_pipeline,
     run_gpu_video_pipeline,
