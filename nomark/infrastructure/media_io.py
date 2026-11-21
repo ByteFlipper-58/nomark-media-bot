@@ -232,15 +232,29 @@ def ensure_video_mp4_if_needed(src: Path, work_dir: Path, needs_isobmff: bool) -
 
 
 def apply_natural_film_polish(src: Path, dst: Path) -> Path:
-    """Apply subtle unsharp + natural temporal grain using fast high-fidelity x264."""
-    cmd = [
-        "ffmpeg", "-y", "-loglevel", "error", "-i", str(src),
-        "-vf", "unsharp=5:5:0.45:3:3:0.0,noise=c0s=4:allf=t+u",
-        "-c:v", "libx264", "-preset", "veryfast", "-crf", "16", "-threads", "0", "-pix_fmt", "yuv420p",
+    """Apply contrast-adaptive micro-detail restore + subtle organic luma grain (single high-fidelity encode)."""
+    base_tail = [
+        "-c:v", "libx264", "-profile:v", "high", "-preset", "medium", "-tune", "film",
+        "-crf", "15", "-threads", "0", "-pix_fmt", "yuv420p",
         "-c:a", "copy", "-map_metadata", "-1", "-map_chapters", "-1", "-movflags", "+faststart",
         str(dst),
     ]
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    primary_vf = "cas=strength=0.28:planes=1,noise=c0s=2:c0f=t+a"
+    fallback_vf = "unsharp=3:3:0.20:3:3:0.0,noise=c0s=2:c0f=t+a"
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-vf", primary_vf, *base_tail],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+    except subprocess.CalledProcessError:
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-vf", fallback_vf, *base_tail],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
     return dst
 
 

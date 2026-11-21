@@ -57,19 +57,25 @@ VALID_STRENGTHS: frozenset[str] = frozenset(STRENGTH_ORDER)
 DEFAULT_STRENGTH = STRENGTH_BALANCED
 
 WAN_STRENGTH_VALUES: dict[str, float] = {
-    STRENGTH_SOFT: 0.25,
-    STRENGTH_BALANCED: 0.30,
-    STRENGTH_STRONG: 0.38,
+    STRENGTH_SOFT: 0.22,
+    STRENGTH_BALANCED: 0.28,
+    STRENGTH_STRONG: 0.36,
 }
 SDVAE_NOISE_VALUES: dict[str, float] = {
-    STRENGTH_SOFT: 0.22,
-    STRENGTH_BALANCED: 0.30,
-    STRENGTH_STRONG: 0.40,
+    STRENGTH_SOFT: 0.13,
+    STRENGTH_BALANCED: 0.16,
+    STRENGTH_STRONG: 0.22,
 }
 
+WAN21_INFERENCE_STEPS = 32
+WAN21_GUIDANCE_SCALE = 2.0
 WAN21_NATURAL_PROMPT = (
-    "Raw handheld camera video, authentic human skin texture with natural pores "
-    "and fine facial details, realistic natural lighting, subtle film grain, unretouched."
+    "Raw realistic camera footage, natural human skin pores and fine micro-texture, "
+    "sharp optical focus, authentic natural lighting, true-to-life details, unretouched."
+)
+WAN21_NEGATIVE_PROMPT = (
+    "cartoon, anime, 3d render, CGI, plastic skin, waxy, airbrushed, overly smooth, "
+    "illustration, painting, pixelated, blocky, compression artifacts, blurry, low quality, flicker"
 )
 
 # Photo source vendor profiles
@@ -105,7 +111,7 @@ DEFAULT_LANG = LANG_EN
 DEFAULT_CLEAN_AUDIO = True
 DEFAULT_NATURAL_POLISH = True
 
-CACHE_SCHEMA_VERSION = "v4"
+CACHE_SCHEMA_VERSION = "v5"
 
 # Approximate Modal Starter per-second rates (GPU + container CPU/RAM)
 MODAL_MONTHLY_FREE_USD = 30.0

@@ -56,6 +56,7 @@ from nomark.infrastructure.media_io import (
     inject_camera_exif,
     pack_files_to_zip,
 )
+from nomark.infrastructure.ml_loaders import _CfgPipeProxy
 
 
 class DomainModelTests(unittest.TestCase):
@@ -248,6 +249,23 @@ class MediaIoTests(unittest.TestCase):
                 from remove_ai_watermarks.metadata import get_ai_metadata
 
                 self.assertEqual(get_ai_metadata(out_iphone), {})
+
+    def test_cfg_pipe_proxy_injects_negative_embeds_only_when_cfg_enabled(self) -> None:
+        calls: list[dict] = []
+
+        class DummyPipe:
+            tag = "wan21"
+
+            def __call__(self, **kwargs):
+                calls.append(kwargs)
+                return "ok"
+
+        proxy = _CfgPipeProxy(DummyPipe(), "NEG_TENSOR")
+        self.assertEqual(proxy.tag, "wan21")
+        proxy(guidance_scale=2.0, prompt_embeds="POS_TENSOR")
+        self.assertEqual(calls[-1]["negative_prompt_embeds"], "NEG_TENSOR")
+        proxy(guidance_scale=1.0, prompt_embeds="POS_TENSOR")
+        self.assertNotIn("negative_prompt_embeds", calls[-1])
 
 
 if __name__ == "__main__":

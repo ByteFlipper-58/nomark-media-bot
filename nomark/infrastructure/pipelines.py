@@ -29,6 +29,8 @@ from nomark.config import (
     TELEGRAM_MAX_UPLOAD_BYTES,
     TELEGRAM_PHOTO_MAX_BYTES,
     TMP_INPUTS_DIR,
+    WAN21_GUIDANCE_SCALE,
+    WAN21_INFERENCE_STEPS,
     WAN_STRENGTH_VALUES,
 )
 from nomark.domain.models import UserSettings
@@ -1647,14 +1649,21 @@ def run_gpu_video_pipeline(
                 if use_wan:
                     from remove_ai_watermarks import video_wan
 
-                    video_wan._PROFILE_STRENGTHS["wan21-synthid-experimental"] = WAN_STRENGTH_VALUES.get(video_strength, 0.30)
+                    video_wan.WAN21_INFERENCE_STEPS = WAN21_INFERENCE_STEPS
+                    video_wan.WAN21_GUIDANCE_SCALE = WAN21_GUIDANCE_SCALE
+                    video_wan._PROFILE_STRENGTHS["wan21-synthid-experimental"] = WAN_STRENGTH_VALUES.get(
+                        video_strength, 0.28
+                    )
+                    # Request lossless crf=0 master when applying film polish to prevent double H.264 compression!
+                    extra_kwargs["quality"] = "master" if natural_polish else "delivery"
                 else:
                     from remove_ai_watermarks.video_invisible import _probe_video
 
                     src_w, src_h, _src_fps = _probe_video(work_src)
                     extra_kwargs["long_side"] = max(512, min(max(src_w, src_h), 1280))
                     extra_kwargs["fps"] = None
-                    extra_kwargs["noise_std"] = SDVAE_NOISE_VALUES.get(video_strength, 0.30)
+                    extra_kwargs["noise_std"] = SDVAE_NOISE_VALUES.get(video_strength, 0.16)
+                    extra_kwargs["temporal_stabilize"] = True
 
                 status_icon = "🎬" if use_wan else "⚡"
                 tg.edit_message_text(
