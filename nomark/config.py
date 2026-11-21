@@ -67,8 +67,10 @@ SDVAE_NOISE_VALUES: dict[str, float] = {
     STRENGTH_STRONG: 0.22,
 }
 
-WAN21_INFERENCE_STEPS = 32
-WAN21_GUIDANCE_SCALE = 2.0
+WAN21_INFERENCE_STEPS = 24
+WAN21_GUIDANCE_SCALE = 1.0
+WAN21_CHUNK_FRAMES = 81
+WAN21_OVERLAP_FRAMES = 9
 WAN21_NATURAL_PROMPT = (
     "Raw realistic camera footage, natural human skin pores and fine micro-texture, "
     "sharp optical focus, authentic natural lighting, true-to-life details, unretouched."

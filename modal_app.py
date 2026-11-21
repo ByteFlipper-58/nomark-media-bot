@@ -792,7 +792,7 @@ class VideoFastGpuWorker:
     memory=32768,
     volumes={CACHE_DIR: model_cache},
     secrets=[bot_secrets],
-    timeout=900,
+    timeout=1200,
     startup_timeout=600,
     scaledown_window=75,
     max_containers=2,

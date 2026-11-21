@@ -30,8 +30,10 @@ from nomark.config import (
     TELEGRAM_MAX_UPLOAD_BYTES,
     TELEGRAM_PHOTO_MAX_BYTES,
     TMP_INPUTS_DIR,
+    WAN21_CHUNK_FRAMES,
     WAN21_GUIDANCE_SCALE,
     WAN21_INFERENCE_STEPS,
+    WAN21_OVERLAP_FRAMES,
     WAN_STRENGTH_VALUES,
 )
 from nomark.domain.models import UserSettings
@@ -1686,8 +1688,6 @@ def run_gpu_video_pipeline(
                     video_wan._PROFILE_STRENGTHS["wan21-synthid-experimental"] = WAN_STRENGTH_VALUES.get(
                         video_strength, 0.28
                     )
-                    # Request lossless crf=0 master when applying film polish to prevent double H.264 compression!
-                    extra_kwargs["quality"] = "master" if natural_polish else "delivery"
                 else:
                     from remove_ai_watermarks.video_invisible import _probe_video
 
@@ -1698,20 +1698,33 @@ def run_gpu_video_pipeline(
                     extra_kwargs["temporal_stabilize"] = True
 
                 status_icon = "🎬" if use_wan else "⚡"
-                tg.edit_message_text(
+                _safe_edit_status(
+                    tg,
                     chat_id,
                     status_message_id,
                     t("status.video_running", lang, icon=status_icon, mode_caption=mode_caption, strength=s_label),
                 )
 
-                inv_result = raiw.remove_video_invisible(
-                    work_src,
-                    visual_out,
-                    profile=profile,
-                    device="cuda",
-                    _runtime=runtime,
-                    **extra_kwargs,
-                )
+                if use_wan:
+                    inv_result = raiw.remove_video_wan_experimental(
+                        work_src,
+                        visual_out,
+                        profile=profile,
+                        device="cuda",
+                        quality="master" if natural_polish else "delivery",
+                        chunk_frames=WAN21_CHUNK_FRAMES,
+                        overlap_frames=WAN21_OVERLAP_FRAMES,
+                        _runtime=runtime,
+                    )
+                else:
+                    inv_result = raiw.remove_video_invisible(
+                        work_src,
+                        visual_out,
+                        profile=profile,
+                        device="cuda",
+                        _runtime=runtime,
+                        **extra_kwargs,
+                    )
 
                 output_to_send = inv_result.output
                 if use_wan and natural_polish:
@@ -1820,5 +1833,17 @@ def run_gpu_video_pipeline(
                 tg.edit_message_text(chat_id, status_message_id, format_error_text(exc, lang))
             except Exception:
                 pass
+        except BaseException as cancel_exc:
+            worker = "VideoWanGpuWorker" if use_wan else "VideoFastGpuWorker"
+            log.warning("%s.clean_video interrupted/timed out: %s", worker, cancel_exc.__class__.__name__)
+            try:
+                tg.edit_message_text(
+                    chat_id,
+                    status_message_id,
+                    format_error_text(TimeoutError("Processing timed out or was cancelled by worker limit."), lang),
+                )
+            except Exception:
+                pass
+            raise
         finally:
             vol.cleanup_staged_input(staged_path)

@@ -58,6 +58,7 @@ def configure_cuda_perf() -> None:
             torch.backends.cudnn.allow_tf32 = True
             torch.backends.cudnn.benchmark = True
             torch.set_float32_matmul_precision("high")
+            log.info("CUDA device ready: %s", torch.cuda.get_device_name(0))
     except Exception:
         pass
 
