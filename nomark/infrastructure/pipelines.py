@@ -51,6 +51,7 @@ from nomark.infrastructure.media_io import (
     ensure_video_mp4_if_needed,
     extract_images_from_zip,
     inject_camera_exif,
+    normalize_video_audio_timeline,
     pack_files_to_zip,
 )
 from nomark.infrastructure.ml_loaders import configure_cache_env
@@ -1626,6 +1627,77 @@ def run_gpu_audio_pipeline(
 # ---------------------------------------------------------------------------
 
 
+def _run_video_audio_removal(video_audio: Any, src_path: Path, dst_path: Path) -> Any:
+    """Run DAC audio SynthID removal across all audio streams with quality-override retry."""
+    try:
+        return video_audio.remove_video_audio_all_streams(
+            src_path,
+            dst_path,
+            vendor="google",
+            method="auto",
+            vocoder_device="cuda",
+            verify=False,
+            allow_unverified=True,
+            allow_quality_override=False,
+        )
+    except Exception as first_exc:
+        if "quality" in str(first_exc).lower():
+            dst_path.unlink(missing_ok=True)
+            return video_audio.remove_video_audio_all_streams(
+                src_path,
+                dst_path,
+                vendor="google",
+                method="auto",
+                vocoder_device="cuda",
+                verify=False,
+                allow_unverified=True,
+                allow_quality_override=True,
+            )
+        raise
+
+
+def _clean_video_audio_with_recovery(
+    video_audio: Any,
+    src_path: Path,
+    final_out: Path,
+    work_dir: Path,
+) -> tuple[Path, bool, bool]:
+    """Clean video audio tracks; normalize discontinuous timelines on error; fall back instead of failing video."""
+    try:
+        audio_res = _run_video_audio_removal(video_audio, src_path, final_out)
+        if not audio_res.skipped and audio_res.output is not None:
+            return audio_res.output, True, False
+        return src_path, False, False
+    except Exception as exc:
+        err_lower = str(exc).lower()
+        final_out.unlink(missing_ok=True)
+        if "out of memory" in err_lower or "cuda" in err_lower:
+            log.warning("Video audio SynthID cleaning skipped due to GPU error; keeping cleaned video: %s", exc)
+            return src_path, False, True
+
+        log.warning(
+            "Video audio SynthID cleaning failed (%s); normalizing audio timeline (video stream-copy) and retrying.",
+            exc,
+        )
+        norm_audio_out = work_dir / f"{src_path.stem}_norm_audio.mp4"
+        try:
+            normalize_video_audio_timeline(src_path, norm_audio_out)
+            audio_res = _run_video_audio_removal(video_audio, norm_audio_out, final_out)
+            if not audio_res.skipped and audio_res.output is not None:
+                return audio_res.output, True, False
+            return src_path, False, False
+        except Exception as retry_exc:
+            final_out.unlink(missing_ok=True)
+            log.warning(
+                "Video audio SynthID cleaning failed even after timeline normalization; "
+                "delivering cleaned video with original audio intact: %s",
+                retry_exc,
+            )
+            return src_path, False, True
+        finally:
+            norm_audio_out.unlink(missing_ok=True)
+
+
 def run_gpu_video_pipeline(
     *,
     tg_token: str,
@@ -1739,36 +1811,17 @@ def run_gpu_video_pipeline(
                 if has_audio:
                     if clean_audio:
                         _safe_edit_status(tg, chat_id, status_message_id, t("status.video_audio", lang))
-                        try:
-                            audio_res = video_audio.remove_video_audio_all_streams(
-                                output_to_send,
-                                final_out,
-                                vendor="google",
-                                method="auto",
-                                vocoder_device="cuda",
-                                verify=False,
-                                allow_unverified=True,
-                                allow_quality_override=False,
-                            )
-                        except Exception as first_exc:
-                            if "quality" in str(first_exc).lower():
-                                final_out.unlink(missing_ok=True)
-                                audio_res = video_audio.remove_video_audio_all_streams(
-                                    output_to_send,
-                                    final_out,
-                                    vendor="google",
-                                    method="auto",
-                                    vocoder_device="cuda",
-                                    verify=False,
-                                    allow_unverified=True,
-                                    allow_quality_override=True,
-                                )
-                            else:
-                                raise
-                        if not audio_res.skipped and audio_res.output is not None:
-                            output_to_send = audio_res.output
+                        output_to_send, audio_cleaned, audio_fallback = _clean_video_audio_with_recovery(
+                            video_audio,
+                            output_to_send,
+                            final_out,
+                            work_dir,
+                        )
+                        if audio_cleaned:
                             audio_label = t("cap.video_audio_clean", lang)
                             vol.safe_commit()
+                        elif audio_fallback:
+                            audio_label = t("cap.video_audio_fallback", lang)
                         else:
                             audio_label = t("cap.video_audio_copy", lang)
                     else:

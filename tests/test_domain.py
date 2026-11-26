@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import importlib.util
+import shutil
+import subprocess
 import tempfile
 import unittest
 import zipfile
+from fractions import Fraction
 from pathlib import Path
+from types import SimpleNamespace
+from unittest import mock
 
 from nomark.config import (
     EXIF_IPHONE,
@@ -54,9 +59,11 @@ from nomark.domain.policies import (
 from nomark.infrastructure.media_io import (
     extract_images_from_zip,
     inject_camera_exif,
+    normalize_video_audio_timeline,
     pack_files_to_zip,
 )
 from nomark.infrastructure.ml_loaders import _CfgPipeProxy
+from nomark.infrastructure.pipelines import _clean_video_audio_with_recovery
 from nomark.infrastructure.telegram_client import truncate_html_safe
 
 
@@ -277,6 +284,128 @@ class MediaIoTests(unittest.TestCase):
         self.assertTrue(truncated.endswith("..."))
         self.assertNotIn("<a ", truncated)
         self.assertNotIn("<b>", truncated)
+
+    def test_clean_video_audio_with_recovery_normalizes_and_falls_back(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            src = root / "polished.mp4"
+            final_out = root / "final.mp4"
+            src.write_bytes(b"video-bytes")
+
+            calls: list[tuple[Path, bool]] = []
+
+            class StubVideoAudio:
+                def remove_video_audio_all_streams(self, source: Path, output: Path, **kwargs):
+                    calls.append((source, bool(kwargs.get("allow_quality_override"))))
+                    if source == src:
+                        raise ValueError("Discontinuous audio timestamps require a different processing path")
+                    if not kwargs.get("allow_quality_override"):
+                        raise RuntimeError("Audio quality check failed")
+                    output.write_bytes(b"cleaned-audio-video")
+                    return SimpleNamespace(skipped=False, output=output)
+
+            def fake_normalize(in_path: Path, out_path: Path) -> Path:
+                out_path.write_bytes(b"normalized")
+                return out_path
+
+            with mock.patch("nomark.infrastructure.pipelines.normalize_video_audio_timeline", side_effect=fake_normalize):
+                out_path, cleaned, fallback = _clean_video_audio_with_recovery(
+                    StubVideoAudio(),
+                    src,
+                    final_out,
+                    root,
+                )
+
+            self.assertEqual(out_path, final_out)
+            self.assertTrue(cleaned)
+            self.assertFalse(fallback)
+            self.assertEqual(len(calls), 3)
+            self.assertFalse((root / f"{src.stem}_norm_audio.mp4").exists())
+
+            # Persistent audio error must gracefully fall back to delivering the cleaned video.
+            class BrokenVideoAudio:
+                def remove_video_audio_all_streams(self, source: Path, output: Path, **kwargs):
+                    output.write_bytes(b"partial")
+                    raise ValueError("Corrupt audio stream")
+
+            with mock.patch("nomark.infrastructure.pipelines.normalize_video_audio_timeline", side_effect=fake_normalize):
+                out_path2, cleaned2, fallback2 = _clean_video_audio_with_recovery(
+                    BrokenVideoAudio(),
+                    src,
+                    final_out,
+                    root,
+                )
+
+            self.assertEqual(out_path2, src)
+            self.assertFalse(cleaned2)
+            self.assertTrue(fallback2)
+            self.assertFalse(final_out.exists())
+            self.assertFalse((root / f"{src.stem}_norm_audio.mp4").exists())
+
+    @unittest.skipUnless(
+        shutil.which("ffmpeg") is not None and importlib.util.find_spec("remove_ai_watermarks") is not None,
+        "Requires ffmpeg + remove_ai_watermarks",
+    )
+    def test_normalize_video_audio_timeline_fixes_discontinuous_mp4(self) -> None:
+        from remove_ai_watermarks import video_audio as va
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            bad_mp4 = root / "bad.mp4"
+            norm_mp4 = root / "norm.mp4"
+            subprocess.run(
+                [
+                    "ffmpeg",
+                    "-nostdin",
+                    "-y",
+                    "-loglevel",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc=duration=1.5:size=160x120:rate=24",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:sample_rate=48000:duration=1.5",
+                    "-af",
+                    r"asetpts=if(gt(T\,0.6)\,PTS+0.15/TB\,PTS)",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "128k",
+                    str(bad_mp4),
+                ],
+                check=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+
+            bad_audio = [s for s in va._streams(bad_mp4) if s.get("codec_type") == "audio"][0]
+            with self.assertRaisesRegex(ValueError, "Discontinuous audio timestamps"):
+                va._timeline(
+                    bad_mp4,
+                    int(bad_audio["index"]),
+                    int(bad_audio["sample_rate"]),
+                    Fraction(bad_audio["time_base"]),
+                )
+
+            normalize_video_audio_timeline(bad_mp4, norm_mp4)
+            norm_audio = [s for s in va._streams(norm_mp4) if s.get("codec_type") == "audio"][0]
+            start, count = va._timeline(
+                norm_mp4,
+                int(norm_audio["index"]),
+                int(norm_audio["sample_rate"]),
+                Fraction(norm_audio["time_base"]),
+            )
+            self.assertEqual(start, Fraction(0, 1))
+            self.assertGreater(count, 48000)
+            va._verify_packets(bad_mp4, norm_mp4, 0)
 
 
 if __name__ == "__main__":

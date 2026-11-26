@@ -287,7 +287,7 @@ def ensure_video_mp4_if_needed(src: Path, work_dir: Path, needs_isobmff: bool) -
         return src
 
     converted = work_dir / f"{src.stem}_converted.mp4"
-    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src)]
+    cmd = ["ffmpeg", "-nostdin", "-y", "-loglevel", "error", "-i", str(src)]
     if vf_filters:
         cmd.extend(["-vf", ",".join(vf_filters)])
     cmd.extend(
@@ -298,7 +298,7 @@ def ensure_video_mp4_if_needed(src: Path, work_dir: Path, needs_isobmff: bool) -
             str(converted),
         ]
     )
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+    subprocess.run(cmd, check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     return converted
 
 
@@ -314,18 +314,54 @@ def apply_natural_film_polish(src: Path, dst: Path) -> Path:
     fallback_vf = "unsharp=3:3:0.20:3:3:0.0,noise=c0s=2:c0f=t+a"
     try:
         subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-vf", primary_vf, *base_tail],
+            ["ffmpeg", "-nostdin", "-y", "-loglevel", "error", "-i", str(src), "-vf", primary_vf, *base_tail],
             check=True,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
         )
     except subprocess.CalledProcessError:
         subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src), "-vf", fallback_vf, *base_tail],
+            ["ffmpeg", "-nostdin", "-y", "-loglevel", "error", "-i", str(src), "-vf", fallback_vf, *base_tail],
             check=True,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
         )
+    return dst
+
+
+def normalize_video_audio_timeline(src: Path, dst: Path) -> Path:
+    """Rebuild continuous sample-accurate audio timestamps while stream-copying video untouched."""
+    cmd = [
+        "ffmpeg",
+        "-nostdin",
+        "-y",
+        "-loglevel",
+        "error",
+        "-i",
+        str(src),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a",
+        "-c:v",
+        "copy",
+        "-af",
+        "aresample=async=1:first_pts=0",
+        "-c:a",
+        "aac",
+        "-b:a",
+        "256k",
+        "-map_metadata",
+        "-1",
+        "-map_chapters",
+        "-1",
+    ]
+    if dst.suffix.lower() in {".mp4", ".m4v", ".mov"}:
+        cmd.extend(["-movflags", "+faststart"])
+    cmd.append(str(dst))
+    subprocess.run(cmd, check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
     return dst
 
 
